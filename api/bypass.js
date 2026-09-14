@@ -1,7 +1,6 @@
-// Bypass relay — D3S Edition v1.1
+// Bypass relay — D3S Edition v1.2
 // Endpoint: GET /api/bypass?url=<encoded_link>
 // Returns: { ok, resolved, target, host, status, ms }
-// Supports: linkvertise, work.ink, lootlabs, loot-link, lockr, rekonise, boost.ink, sub2unlock, mboost
 
 export const config = { maxDuration: 30 };
 
@@ -16,10 +15,15 @@ const SUPPORTED = [
   'mboost.me',
 ];
 
-const isSupported = (host) =>
-  SUPPORTED.some(d => host === d || host.endsWith('.' + d));
+const isSupported = (host) => SUPPORTED.some(d => host === d || host.endsWith('.' + d));
 
-/* ── fetch helper ── */
+const BAD_HOSTS = [
+  'loot', 'lockr', 'rekonise', 'boost',
+  'google', 'gstatic', 'jsdelivr', 'cloudflare',
+  'unpkg', 'facebook', 'twitter', 'cdn',
+  'bootstrap', 'jquery', 'fontawesome', 'sentry',
+];
+
 async function fetchOnce(url, opts = {}) {
   const ctrl = new AbortController();
   const to = setTimeout(() => ctrl.abort(), 20000);
@@ -45,13 +49,10 @@ async function fetchOnce(url, opts = {}) {
   }
 }
 
-/* ── domain-specific resolvers ── */
-
 async function resolveLinkvertise(url) {
   const r = await fetchOnce(url);
   const loc = r.headers.get('location');
   if (loc) return loc;
-
   const m = url.match(/linkvertise\.(com|net)\/(\d+)\/(.+)/);
   if (m) {
     const apiTry = await fetchOnce(
@@ -74,7 +75,6 @@ async function resolveWorkInk(url) {
   return null;
 }
 
-/* ── LootLabs — handles /s?<slug>&data=<blob> ── */
 async function resolveLootLabs(rawUrl) {
   const u = new URL(rawUrl);
   const host = u.hostname;
@@ -82,7 +82,6 @@ async function resolveLootLabs(rawUrl) {
 
   if (!slug) return null;
 
-  /* attempt 1 — public API endpoints */
   const apiTries = [
     `https://api.lootlabs.gg/api/public/v1/links/${encodeURIComponent(slug)}`,
     `https://${host}/api/links/${encodeURIComponent(slug)}`,
@@ -111,12 +110,11 @@ async function resolveLootLabs(rawUrl) {
           j?.data?.destination ||
           j?.link ||
           null;
-        if (target && !target.includes('loot')) return target;
+        if (target && !BAD_HOSTS.some(b => target.includes(b))) return target;
       } catch {}
     }
   }
 
-  /* attempt 2 — scrape the page */
   const page = await fetchOnce(rawUrl, {
     headers: {
       'Referer': `https://${host}/`,
@@ -124,39 +122,38 @@ async function resolveLootLabs(rawUrl) {
     },
   });
 
-  const patterns = [
+  const strictPatterns = [
     /<meta[^>]+http-equiv=["']refresh["'][^>]+content=["'][^"']*url=([^"']+)/i,
     /window\.location(?:\.href)?\s*=\s*["']([^"']+)/i,
     /"destination"\s*:\s*"([^"]+)"/i,
-    /"target"\s*:\s*"([^"]+)"/i,
     /"redirectUrl"\s*:\s*"([^"]+)"/i,
     /"redirect_url"\s*:\s*"([^"]+)"/i,
     /"finalUrl"\s*:\s*"([^"]+)"/i,
-    /"url"\s*:\s*"([^"]+)"/i,
-    /(?:href|src)=["'](https?:\/\/(?!loot|lockr|rekonise|boost)[^"']+)["']/i,
+    /"final_url"\s*:\s*"([^"]+)"/i,
+    /"link"\s*:\s*"([^"]+)"/i,
   ];
 
-  for (const p of patterns) {
+  for (const p of strictPatterns) {
     const m = page.text.match(p);
     if (m && m[1]) {
       const candidate = m[1]
         .replace(/\\u0026/g, '&')
         .replace(/\\\//g, '/')
         .replace(/\\n/g, '');
-      if (!candidate.includes('loot') && !candidate.includes('google') && !candidate.includes('gstatic')) {
-        return candidate;
-      }
+
+      const lower = candidate.toLowerCase();
+      if (BAD_HOSTS.some(b => lower.includes(b))) continue;
+      if (!candidate.startsWith('http')) continue;
+      return candidate;
     }
   }
 
-  /* attempt 3 — follow redirects from the page itself */
   const followR = await fetchOnce(rawUrl);
   if (followR.headers.get('location')) return followR.headers.get('location');
 
   return null;
 }
 
-/* ── generic resolver ── */
 async function resolveGeneric(url) {
   const r = await fetchOnce(url);
   const loc = r.headers.get('location');
@@ -167,17 +164,18 @@ async function resolveGeneric(url) {
     /window\.location(?:\.href)?\s*=\s*["']([^"']+)/i,
     /"destination"\s*:\s*"([^"]+)"/i,
     /"target"\s*:\s*"([^"]+)"/i,
-    /<a[^>]+href=["'](https?:\/\/[^"']+)["'][^>]*>[^<]*continue/i,
   ];
 
   for (const p of patterns) {
     const m = r.text.match(p);
-    if (m && m[1]) return m[1].replace(/\\u0026/g, '&').replace(/\\\//g, '/');
+    if (m && m[1]) {
+      const c = m[1].replace(/\\u0026/g, '&').replace(/\\\//g, '/');
+      if (!BAD_HOSTS.some(b => c.includes(b))) return c;
+    }
   }
   return null;
 }
 
-/* ── follow redirect chain ── */
 async function follow(url, max = 6) {
   let current = url;
   for (let i = 0; i < max; i++) {
@@ -192,7 +190,6 @@ async function follow(url, max = 6) {
   return current;
 }
 
-/* ── main handler ── */
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
