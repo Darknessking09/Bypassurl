@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "rewrites": [
+    { "source": "/api/bypass", "destination": "/api/bypass" },
+    { "source": "/api/am", "destination": "/api/am" },
+    { "source": "/api/sms", "destination": "/api/sms" },
+    { "source": "/api/relay", "destination": "/api/relay" },
+    { "source": "/(.*)", "destination": "/api/relay" }
+  ]
+}
