@@ -1,11 +1,12 @@
-// Vercel bypass relay - D3S Edition
-// Endpoint: POST /api/bypass
-// Body: { url: "https://links.lootlabs.gg/s?..." }
-// Returns: { ok, status, direct, raw }
+// Vercel /api/bypass — D3S Edition
+// Forwards URL to the Cloudflare bypass-proxy worker.
+// The worker fetches the upstream token automatically.
 
 export const config = { maxDuration: 30 };
 
-const UPSTREAM_BASE = 'https://bypass-links.com';
+// ── Cloudflare Worker URL ──
+const PROXY_BASE = 'https://bypass-proxy.marcelochristann.workers.dev';
+
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 
 async function call(url, opts = {}) {
@@ -32,28 +33,19 @@ async function call(url, opts = {}) {
   }
 }
 
-async function fetchToken() {
-  const t = await call(`${UPSTREAM_BASE}/api/token`);
-  try {
-    const j = JSON.parse(t.text);
-    return j.token || null;
-  } catch (e) {
-    return null;
-  }
-}
-
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
   if (req.method === 'OPTIONS') return res.status(204).end();
 
+  // ── Health check ──
   if (req.method === 'GET') {
     return res.status(200).json({
       ok: true,
       relay: 'vercel-bypass',
-      upstream: UPSTREAM_BASE,
+      proxy: PROXY_BASE,
       ts: Date.now(),
     });
   }
@@ -62,6 +54,7 @@ export default async function handler(req, res) {
     return res.status(405).json({ ok: false, msg: 'POST only' });
   }
 
+  // ── Parse body ──
   let body = req.body;
   if (typeof body === 'string') {
     try { body = JSON.parse(body); }
@@ -72,7 +65,6 @@ export default async function handler(req, res) {
   const url = String(body.url || '').trim();
   if (!url) return res.status(400).json({ ok: false, msg: 'url required' });
 
-  // Validate URL
   try {
     const u = new URL(url);
     if (u.protocol !== 'http:' && u.protocol !== 'https:') {
@@ -82,25 +74,20 @@ export default async function handler(req, res) {
     return res.status(400).json({ ok: false, msg: 'invalid url' });
   }
 
-  // Get bypass token
-  let token = await fetchToken();
-  if (!token) {
-    return res.status(502).json({ ok: false, msg: 'upstream token unavailable' });
-  }
-
-  // Call bypass endpoint
-  const r = await call(`${UPSTREAM_BASE}/api/bypass`, {
+  // ── Forward to Cloudflare Worker ──
+  const r = await call(`${PROXY_BASE}/api/bypass`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url, bypass_token: token }),
+    body: JSON.stringify({ url }),
   });
 
   if (r.status !== 200) {
     return res.status(200).json({
       ok: false,
       status: r.status,
-      msg: 'upstream failed',
-      raw: r.text.slice(0, 300),
+      msg: 'proxy failed',
+      raw: r.text.slice(0, 400),
+      proxy: PROXY_BASE,
     });
   }
 
@@ -110,8 +97,9 @@ export default async function handler(req, res) {
     return res.status(200).json({
       ok: false,
       status: r.status,
-      msg: 'upstream returned non-JSON',
-      raw: r.text.slice(0, 300),
+      msg: 'proxy returned non-JSON',
+      raw: r.text.slice(0, 400),
+      proxy: PROXY_BASE,
     });
   }
 
@@ -119,9 +107,11 @@ export default async function handler(req, res) {
 
   return res.status(200).json({
     ok: !!direct,
+    success: !!direct,
     status: 200,
     direct,
     raw: parsed,
     relay: 'vercel',
+    proxy: PROXY_BASE,
   });
 }
