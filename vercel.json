@@ -1,11 +1,12 @@
 {
   "version": 2,
   "rewrites": [
-    { "source": "/api/upstream", "destination": "/api/upstream" },
-    { "source": "/api/bypass",   "destination": "/api/bypass" },
-    { "source": "/api/am",       "destination": "/api/am" },
-    { "source": "/api/sms",      "destination": "/api/sms" },
-    { "source": "/api/relay",    "destination": "/api/relay" },
-    { "source": "/(.*)",         "destination": "/api/bypass" }
+    { "source": "/api/upstream/(.*)", "destination": "/api/upstream" },
+    { "source": "/api/upstream",      "destination": "/api/upstream" },
+    { "source": "/api/bypass",        "destination": "/api/bypass" },
+    { "source": "/api/am",            "destination": "/api/am" },
+    { "source": "/api/sms",           "destination": "/api/sms" },
+    { "source": "/api/relay",         "destination": "/api/relay" },
+    { "source": "/((?!api).*)",       "destination": "/api/bypass" }
   ]
 }
