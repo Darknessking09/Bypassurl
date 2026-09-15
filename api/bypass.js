@@ -1,30 +1,14 @@
-// Bypass relay — D3S Edition v1.2
-// Endpoint: GET /api/bypass?url=<encoded_link>
-// Returns: { ok, resolved, target, host, status, ms }
+// Vercel bypass relay - D3S Edition
+// Endpoint: POST /api/bypass
+// Body: { url: "https://links.lootlabs.gg/s?..." }
+// Returns: { ok, status, direct, raw }
 
 export const config = { maxDuration: 30 };
 
+const UPSTREAM_BASE = 'https://bypass-links.com';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 
-const SUPPORTED = [
-  'linkvertise.com', 'linkvertise.net', 'link-to.net',
-  'work.ink', 'lootlabs.gg', 'loot-link.com',
-  'lootdest.org', 'lootdest.com', 'lootdest.info',
-  'lootlinks.co', 'lockr.so', 'rekonise.com',
-  'boost.ink', 'sub2unlock.com', 'sub2unlock.net',
-  'mboost.me',
-];
-
-const isSupported = (host) => SUPPORTED.some(d => host === d || host.endsWith('.' + d));
-
-const BAD_HOSTS = [
-  'loot', 'lockr', 'rekonise', 'boost',
-  'google', 'gstatic', 'jsdelivr', 'cloudflare',
-  'unpkg', 'facebook', 'twitter', 'cdn',
-  'bootstrap', 'jquery', 'fontawesome', 'sentry',
-];
-
-async function fetchOnce(url, opts = {}) {
+async function call(url, opts = {}) {
   const ctrl = new AbortController();
   const to = setTimeout(() => ctrl.abort(), 20000);
   try {
@@ -32,220 +16,112 @@ async function fetchOnce(url, opts = {}) {
       method: opts.method || 'GET',
       headers: {
         'User-Agent': UA,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept': 'application/json, text/plain, */*',
         'Accept-Language': 'en-US,en;q=0.9',
         ...(opts.headers || {}),
       },
-      redirect: 'manual',
       body: opts.body,
       signal: ctrl.signal,
     });
     clearTimeout(to);
-    const text = await r.text().catch(() => '');
-    return { status: r.status, headers: r.headers, text, url: r.url };
+    const text = await r.text();
+    return { status: r.status, text };
   } catch (e) {
     clearTimeout(to);
-    return { status: 0, headers: new Headers(), text: '', error: String(e) };
+    return { status: 0, text: String(e) };
   }
 }
 
-async function resolveLinkvertise(url) {
-  const r = await fetchOnce(url);
-  const loc = r.headers.get('location');
-  if (loc) return loc;
-  const m = url.match(/linkvertise\.(com|net)\/(\d+)\/(.+)/);
-  if (m) {
-    const apiTry = await fetchOnce(
-      'https://publisher.linkvertise.com/api/v1/redirect/link/static/' + m[2] + '/' + m[3]
-    );
-    try {
-      const j = JSON.parse(apiTry.text);
-      if (j?.data?.target) return j.data.target;
-    } catch {}
+async function fetchToken() {
+  const t = await call(`${UPSTREAM_BASE}/api/token`);
+  try {
+    const j = JSON.parse(t.text);
+    return j.token || null;
+  } catch (e) {
+    return null;
   }
-  return null;
-}
-
-async function resolveWorkInk(url) {
-  const r = await fetchOnce(url);
-  const loc = r.headers.get('location');
-  if (loc) return loc;
-  const m = r.text.match(/content=["']0;\s*url=([^"']+)/i);
-  if (m) return m[1];
-  return null;
-}
-
-async function resolveLootLabs(rawUrl) {
-  const u = new URL(rawUrl);
-  const host = u.hostname;
-  const slug = u.searchParams.keys().next().value || null;
-
-  if (!slug) return null;
-
-  const apiTries = [
-    `https://api.lootlabs.gg/api/public/v1/links/${encodeURIComponent(slug)}`,
-    `https://${host}/api/links/${encodeURIComponent(slug)}`,
-    `https://${host}/api/public/v1/links/${encodeURIComponent(slug)}`,
-    `https://api.loot-link.com/api/v1/links/${encodeURIComponent(slug)}`,
-  ];
-
-  for (const api of apiTries) {
-    const r = await fetchOnce(api, {
-      headers: {
-        'Referer': rawUrl,
-        'Origin': `https://${host}`,
-        'Accept': 'application/json, text/plain, */*',
-        'X-Requested-With': 'XMLHttpRequest',
-      },
-    });
-    if (r.status === 200) {
-      try {
-        const j = JSON.parse(r.text);
-        const target =
-          j?.target ||
-          j?.url ||
-          j?.destination ||
-          j?.data?.target ||
-          j?.data?.url ||
-          j?.data?.destination ||
-          j?.link ||
-          null;
-        if (target && !BAD_HOSTS.some(b => target.includes(b))) return target;
-      } catch {}
-    }
-  }
-
-  const page = await fetchOnce(rawUrl, {
-    headers: {
-      'Referer': `https://${host}/`,
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    },
-  });
-
-  const strictPatterns = [
-    /<meta[^>]+http-equiv=["']refresh["'][^>]+content=["'][^"']*url=([^"']+)/i,
-    /window\.location(?:\.href)?\s*=\s*["']([^"']+)/i,
-    /"destination"\s*:\s*"([^"]+)"/i,
-    /"redirectUrl"\s*:\s*"([^"]+)"/i,
-    /"redirect_url"\s*:\s*"([^"]+)"/i,
-    /"finalUrl"\s*:\s*"([^"]+)"/i,
-    /"final_url"\s*:\s*"([^"]+)"/i,
-    /"link"\s*:\s*"([^"]+)"/i,
-  ];
-
-  for (const p of strictPatterns) {
-    const m = page.text.match(p);
-    if (m && m[1]) {
-      const candidate = m[1]
-        .replace(/\\u0026/g, '&')
-        .replace(/\\\//g, '/')
-        .replace(/\\n/g, '');
-
-      const lower = candidate.toLowerCase();
-      if (BAD_HOSTS.some(b => lower.includes(b))) continue;
-      if (!candidate.startsWith('http')) continue;
-      return candidate;
-    }
-  }
-
-  const followR = await fetchOnce(rawUrl);
-  if (followR.headers.get('location')) return followR.headers.get('location');
-
-  return null;
-}
-
-async function resolveGeneric(url) {
-  const r = await fetchOnce(url);
-  const loc = r.headers.get('location');
-  if (loc) return loc;
-
-  const patterns = [
-    /<meta[^>]+http-equiv=["']refresh["'][^>]+content=["'][^"']*url=([^"']+)/i,
-    /window\.location(?:\.href)?\s*=\s*["']([^"']+)/i,
-    /"destination"\s*:\s*"([^"]+)"/i,
-    /"target"\s*:\s*"([^"]+)"/i,
-  ];
-
-  for (const p of patterns) {
-    const m = r.text.match(p);
-    if (m && m[1]) {
-      const c = m[1].replace(/\\u0026/g, '&').replace(/\\\//g, '/');
-      if (!BAD_HOSTS.some(b => c.includes(b))) return c;
-    }
-  }
-  return null;
-}
-
-async function follow(url, max = 6) {
-  let current = url;
-  for (let i = 0; i < max; i++) {
-    const r = await fetchOnce(current);
-    const loc = r.headers.get('location');
-    if (loc) {
-      try { current = new URL(loc, current).toString(); } catch { current = loc; }
-      continue;
-    }
-    break;
-  }
-  return current;
 }
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
   if (req.method === 'OPTIONS') return res.status(204).end();
 
-  const target = req.query?.url || new URL(req.url, 'http://x').searchParams.get('url');
-  if (!target) return res.status(400).json({ ok: false, msg: 'url required' });
-
-  let parsed;
-  try { parsed = new URL(target); }
-  catch { return res.status(400).json({ ok: false, msg: 'bad url' }); }
-
-  if (!isSupported(parsed.hostname)) {
+  if (req.method === 'GET') {
     return res.status(200).json({
-      ok: false,
-      msg: 'unsupported host',
-      host: parsed.hostname,
-      supported: SUPPORTED,
+      ok: true,
+      relay: 'vercel-bypass',
+      upstream: UPSTREAM_BASE,
+      ts: Date.now(),
     });
   }
 
-  const t0 = Date.now();
-  let resolved = null;
-  let method = 'unknown';
-
-  try {
-    if (parsed.hostname.includes('linkvertise') || parsed.hostname.includes('link-to')) {
-      method = 'linkvertise';
-      resolved = await resolveLinkvertise(target);
-    } else if (parsed.hostname.includes('work.ink')) {
-      method = 'workink';
-      resolved = await resolveWorkInk(target);
-    } else if (parsed.hostname.match(/loot|lockr|rekonise|boost|sub2unlock|mboost/)) {
-      method = 'lootlabs';
-      resolved = await resolveLootLabs(target);
-    } else {
-      method = 'generic';
-      resolved = await resolveGeneric(target);
-    }
-
-    if (!resolved) {
-      method += '+follow';
-      resolved = await follow(target);
-    }
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: String(e), ms: Date.now() - t0 });
+  if (req.method !== 'POST') {
+    return res.status(405).json({ ok: false, msg: 'POST only' });
   }
 
+  let body = req.body;
+  if (typeof body === 'string') {
+    try { body = JSON.parse(body); }
+    catch { body = Object.fromEntries(new URLSearchParams(body)); }
+  }
+  if (!body || typeof body !== 'object') body = {};
+
+  const url = String(body.url || '').trim();
+  if (!url) return res.status(400).json({ ok: false, msg: 'url required' });
+
+  // Validate URL
+  try {
+    const u = new URL(url);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+      return res.status(400).json({ ok: false, msg: 'invalid protocol' });
+    }
+  } catch (e) {
+    return res.status(400).json({ ok: false, msg: 'invalid url' });
+  }
+
+  // Get bypass token
+  let token = await fetchToken();
+  if (!token) {
+    return res.status(502).json({ ok: false, msg: 'upstream token unavailable' });
+  }
+
+  // Call bypass endpoint
+  const r = await call(`${UPSTREAM_BASE}/api/bypass`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url, bypass_token: token }),
+  });
+
+  if (r.status !== 200) {
+    return res.status(200).json({
+      ok: false,
+      status: r.status,
+      msg: 'upstream failed',
+      raw: r.text.slice(0, 300),
+    });
+  }
+
+  let parsed;
+  try { parsed = JSON.parse(r.text); }
+  catch (e) {
+    return res.status(200).json({
+      ok: false,
+      status: r.status,
+      msg: 'upstream returned non-JSON',
+      raw: r.text.slice(0, 300),
+    });
+  }
+
+  const direct = parsed.direct || parsed.result || parsed.destination || null;
+
   return res.status(200).json({
-    ok: !!resolved && resolved !== target,
-    source: target,
-    host: parsed.hostname,
-    resolved,
-    method,
-    ms: Date.now() - t0,
+    ok: !!direct,
+    status: 200,
+    direct,
+    raw: parsed,
+    relay: 'vercel',
   });
 }
